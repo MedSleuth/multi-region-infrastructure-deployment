@@ -23,11 +23,27 @@ Parameters:
 
   SolutionSecretName:
     Type: String
-    Description: AWS Secrets Manager name
-  GitHubRepo:
+    Description: (Optional when you are using CodeCommit) AWS Secrets Manager name
+
+  SourceOwner:
     Type: String
-    Description: GitHub repository name
-  GitHubBranch:
+    Description: Source owner name
+    AllowedValues:
+      - AWS
+      - ThirdParty
+  
+  Provider:
+    Type: String
+    Description: Provider name
+    AllowedValues:
+      - CodeCommit
+      - GitHub
+
+  ProviderRepo:
+    Type: String
+    Description: Provider repository name
+
+  ProviderBranch:
     Type: String
     Description: e.g., mainline
 
@@ -74,11 +90,13 @@ Metadata:
         Parameters:
           - NotificationEmailAddress
       - Label:
-          default: GitHub Repository Configuration
+          default: Provider Repository Configuration
         Parameters:
           - SolutionSecretName
-          - GitHubRepo
-          - GitHubBranch
+          - SourceOwner
+          - Provider
+          - ProviderRepo
+          - ProviderBranch
           - TemplatePath
       - Label:
           default: Application Stack Parameters
@@ -95,11 +113,15 @@ Metadata:
     ParameterLabels:
       NotificationEmailAddress:
         default: E-Mail to notify changes to approve and drift detection
+      SourceOwner:
+        default: Name of the owner of the service
+      Provider:
+        default: Name of the provider where the repository is stored
       SolutionSecretName:
         default: Name of the AWS Secrets Manager secret that stores the GitHub Username and Personal Access Token to access the repository
-      GitHubRepo:
-        default: Name of the GitHub repository that should trigger the pipeline
-      GitHubBranch:
+      ProviderRepo:
+        default: Name of the provider repository that should trigger the pipeline
+      ProviderBranch:
         default: Name of the branch in the above repository that should trigger the pipeline
       TemplatePath:
         default: Path to the CloudFormation template in the above repository
@@ -122,6 +144,7 @@ Conditions:
   HasSecondaryParameters: !Not [ !Equals [ !Ref SecondaryParameters, '' ] ]
   HasPrimaryParameters: !Not [ !Equals [ !Ref PrimaryParameters, '' ] ]
   DeletingStage: !Equals [ !Ref DeleteStageStack, 'Yes' ]
+  IsGitHub: !Equals [ !Ref Provider, 'GitHub' ]
 
 Mappings:
   SourceCode:
@@ -278,6 +301,17 @@ Resources:
                   - sns:Publish
                 Resource:
                   - !Ref NotificationSnsTopic
+              - Effect: Allow
+                Action:
+                  - codecommit:GetBranch
+                  - codecommit:GetCommit
+                  - codecommit:GetRepository
+                  - codecommit:GitPull
+                  - codecommit:UploadArchive
+                  - codecommit:GetUploadArchiveStatus
+                  - codecommit:CancelUploadArchive
+                Resource:
+                  - !Sub arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${ProviderRepo}
 
   CodeBuildServiceRole:
     Type: AWS::IAM::Role
@@ -350,18 +384,20 @@ Resources:
       Stages:
         - Name: Source
           Actions:
-            - Name: GitHub
+            - Name: !Ref Provider
               ActionTypeId:
                 Category: Source
-                Owner: ThirdParty
+                Owner: !Ref SourceOwner
                 Version: '1'
-                Provider: GitHub
+                Provider: !Ref Provider
               Configuration:
-                Owner: !Sub '{{resolve:secretsmanager:${SolutionSecretName}:SecretString:github-username}}'
-                Repo: !Ref GitHubRepo
-                Branch: !Ref GitHubBranch
-                OAuthToken: !Sub '{{resolve:secretsmanager:${SolutionSecretName}:SecretString:github-access-token}}'
-                PollForSourceChanges: false
+                Owner: !If [ IsGitHub, !Sub '{{resolve:secretsmanager:${SolutionSecretName}:SecretString:github-username}}', !Ref "AWS::NoValue" ]
+                Repo: !If [ IsGitHub, !Ref ProviderRepo, !Ref "AWS::NoValue" ]
+                RepositoryName: !If [ IsGitHub, !Ref "AWS::NoValue", !Ref ProviderRepo ]
+                Branch: !If [ IsGitHub, !Ref ProviderBranch, !Ref "AWS::NoValue" ]
+                BranchName: !If [ IsGitHub, !Ref "AWS::NoValue", !Ref ProviderBranch ]
+                OAuthToken: !If [ IsGitHub, !Sub '{{resolve:secretsmanager:${SolutionSecretName}:SecretString:github-access-token}}', !Ref "AWS::NoValue" ]
+                PollForSourceChanges: !If [ IsGitHub, false, true ]
               OutputArtifacts:
                 - Name: Source
         - !If
@@ -603,6 +639,7 @@ Resources:
 
   InfraPipelineWebhook:
     Type: AWS::CodePipeline::Webhook
+    Condition: IsGitHub
     Properties:
       Authentication: GITHUB_HMAC
       AuthenticationConfiguration:

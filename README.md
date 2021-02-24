@@ -72,6 +72,15 @@ aws s3 sync ./global-s3-assets/ s3://$DIST_OUTPUT_BUCKET-$REGION/$SOLUTION_NAME/
 * Get the link of the multi-region-infrastructure-deployment.template uploaded to your Amazon S3 bucket.
 * Deploy the Multi Region Infrastructure Deployment Solution to your account by launching a new AWS CloudFormation stack using the S3 link of the multi-region-infrastructure-deployment.template.
 
+### 6. Launch the updated CloudFormation template that supports CodeCommit
+* Now it's possible to use GitHub or CodeCommit as the repository provider. In order to achieve that were added two CloudFormation parameters to substitute some hard-coded values:
+- SourceOwner: it's possible to select between `AWS` or `ThirdParty`
+- Provider: it's possible to select between `CodeCommit` or `GitHub` 
+
+And also, some parameters were changed to keep the template parameters meaningful:
+- From `GitHubRepo` to `ProviderRepo`
+- From `GitHubBranch` to `ProviderBranch`
+
 ## File Structure
 ```
 |-deployment/
