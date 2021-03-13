@@ -23,11 +23,49 @@ Parameters:
 
   SolutionSecretName:
     Type: String
-    Description: AWS Secrets Manager name
-  GitHubRepo:
+    Description: (Optional when you are using CodeCommit) AWS Secrets Manager name
+
+  SourceOwner:
     Type: String
-    Description: GitHub repository name
-  GitHubBranch:
+    Description: Source owner name
+    AllowedValues:
+      - AWS
+      - ThirdParty
+
+  SecondSourceOwner:
+    Type: String
+    Description: Source owner name
+    AllowedValues:
+      - AWS
+      - ThirdParty
+  
+  Provider:
+    Type: String
+    Description: Provider name
+    AllowedValues:
+      - CodeCommit
+      - GitHub
+  
+  SecondaryProvider:
+    Type: String
+    Description: Provider name
+    AllowedValues:
+      - CodeCommit
+      - GitHub
+
+  ProviderRepo:
+    Type: String
+    Description: Provider repository name
+
+  SecondaryProviderRepo:
+    Type: String
+    Description: Provider repository name
+
+  ProviderBranch:
+    Type: String
+    Description: e.g., mainline
+
+  SecondaryProviderBranch:
     Type: String
     Description: e.g., mainline
 
@@ -36,6 +74,10 @@ Parameters:
     Description: Specified in the standard format, e.g., us-east-1, us-west-2, etc...
 
   TemplatePath:
+    Type: String
+    Description: Specified from the root of the Git repository, e.g., templates/my_template.yaml
+
+  SecondaryTemplatePath:
     Type: String
     Description: Specified from the root of the Git repository, e.g., templates/my_template.yaml
 
@@ -74,11 +116,13 @@ Metadata:
         Parameters:
           - NotificationEmailAddress
       - Label:
-          default: GitHub Repository Configuration
+          default: Provider Repository Configuration
         Parameters:
           - SolutionSecretName
-          - GitHubRepo
-          - GitHubBranch
+          - SourceOwner
+          - Provider
+          - ProviderRepo
+          - ProviderBranch
           - TemplatePath
       - Label:
           default: Application Stack Parameters
@@ -95,11 +139,15 @@ Metadata:
     ParameterLabels:
       NotificationEmailAddress:
         default: E-Mail to notify changes to approve and drift detection
+      SourceOwner:
+        default: Name of the owner of the service
+      Provider:
+        default: Name of the provider where the repository is stored
       SolutionSecretName:
         default: Name of the AWS Secrets Manager secret that stores the GitHub Username and Personal Access Token to access the repository
-      GitHubRepo:
-        default: Name of the GitHub repository that should trigger the pipeline
-      GitHubBranch:
+      ProviderRepo:
+        default: Name of the provider repository that should trigger the pipeline
+      ProviderBranch:
         default: Name of the branch in the above repository that should trigger the pipeline
       TemplatePath:
         default: Path to the CloudFormation template in the above repository
@@ -122,6 +170,7 @@ Conditions:
   HasSecondaryParameters: !Not [ !Equals [ !Ref SecondaryParameters, '' ] ]
   HasPrimaryParameters: !Not [ !Equals [ !Ref PrimaryParameters, '' ] ]
   DeletingStage: !Equals [ !Ref DeleteStageStack, 'Yes' ]
+  IsGitHub: !Equals [ !Ref Provider, 'GitHub' ]
 
 Mappings:
   SourceCode:
@@ -139,6 +188,14 @@ Mappings:
     Parameter:
       Source: source-artifact
       Parameter: parameter-artifact
+  SecondStageArtifact:
+    Name:
+      ChangeSet: Second-Multi-Region-Stage-ChangeSet
+      Source: SecondStageArtifact-Source
+      Parameter: SecondStageArtifact-Parameter
+    Parameter:
+      Source: second-source-artifact
+      Parameter: second-parameter-artifact
 
 Resources:
   PrimaryArtifactStore:
@@ -260,13 +317,15 @@ Resources:
               - Effect: Allow
                 Action:
                   - cloudformation:ValidateTemplate
+                  - lambda:*
                 Resource:
                   - '*'
               - Effect: Allow
                 Action:
                   - lambda:InvokeFunction
                 Resource:
-                  - !GetAtt ChangeSetValidatorLambda.Arn
+                  - !GetAtt ChangeSetValidatorLambdaFirstRepo.Arn
+                  - !GetAtt ChangeSetValidatorLambdaSecondRepo.Arn
                   - !GetAtt DriftDetectionLambda.Arn
                   - !GetAtt StageArtifactSsmLambda.Arn
                   - !If
@@ -278,6 +337,17 @@ Resources:
                   - sns:Publish
                 Resource:
                   - !Ref NotificationSnsTopic
+              - Effect: Allow
+                Action:
+                  - codecommit:GetBranch
+                  - codecommit:GetCommit
+                  - codecommit:GetRepository
+                  - codecommit:GitPull
+                  - codecommit:UploadArchive
+                  - codecommit:GetUploadArchiveStatus
+                  - codecommit:CancelUploadArchive
+                Resource:
+                  - !Sub arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${ProviderRepo}
 
   CodeBuildServiceRole:
     Type: AWS::IAM::Role
@@ -350,23 +420,39 @@ Resources:
       Stages:
         - Name: Source
           Actions:
-            - Name: GitHub
+            - Name: !Ref Provider
               ActionTypeId:
                 Category: Source
-                Owner: ThirdParty
+                Owner: !Ref SourceOwner
                 Version: '1'
-                Provider: GitHub
+                Provider: !Ref Provider
+              Configuration:
+                Owner: !If [ IsGitHub, !Sub '{{resolve:secretsmanager:${SolutionSecretName}:SecretString:github-username}}', !Ref "AWS::NoValue" ]
+                RepositoryName: !Ref ProviderRepo 
+                BranchName: !Ref ProviderBranch 
+                OAuthToken: !Ref "AWS::NoValue"
+                PollForSourceChanges: true 
+              OutputArtifacts:
+                - Name: !Ref Provider #Source
+
+            - Name: !Ref SecondaryProvider
+              ActionTypeId:
+                Category: Source
+                Owner: !Ref SecondSourceOwner
+                Version: '1'
+                Provider: !Ref SecondaryProvider
               Configuration:
                 Owner: !Sub '{{resolve:secretsmanager:${SolutionSecretName}:SecretString:github-username}}'
-                Repo: !Ref GitHubRepo
-                Branch: !Ref GitHubBranch
+                Repo: !Ref SecondaryProviderRepo
+                Branch: !Ref SecondaryProviderBranch
                 OAuthToken: !Sub '{{resolve:secretsmanager:${SolutionSecretName}:SecretString:github-access-token}}'
-                PollForSourceChanges: false
+                PollForSourceChanges: false, true ]
               OutputArtifacts:
-                - Name: Source
+                - Name: !Ref SecondaryProvider
+
         - !If
           - DeletingStage
-          - Name: !Sub InitializeStage-${AWS::Region}
+          - Name: !Sub InitializeStage-${AWS::Region} 
             Actions:
               - Name: CreateStageArtifact
                 ActionTypeId:
@@ -377,7 +463,7 @@ Resources:
                 Configuration:
                   FunctionName: !Ref CreateStageArtifactLambda
                 InputArtifacts:
-                  - Name: Source
+                  - Name: !Ref Provider
                 OutputArtifacts:
                   - Name: StageArtifact-Source
                   - Name: StageArtifact-Parameter
@@ -393,7 +479,7 @@ Resources:
                 Configuration:
                   ActionMode: CREATE_UPDATE
                   RoleArn: !GetAtt CloudFormationExecutionRole.Arn
-                  StackName: !Sub ${AWS::StackName}-Stack-Stage-${AWS::Region}
+                  StackName: !Sub ${AWS::StackName}-Stack-Stage-${AWS::Region}-${Provider}
                   TemplatePath: !Sub StageArtifact-Source::${TemplatePath}
                   TemplateConfiguration: StageArtifact-Parameter::parameters.json
                   Capabilities: CAPABILITY_IAM,CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
@@ -402,49 +488,49 @@ Resources:
                   - Name: StageArtifact-Parameter
                 RunOrder: 2
                 Region: !Ref AWS::Region
+
+              - Name: CreateStageArtifact-2
+                ActionTypeId:
+                  Category: Invoke
+                  Owner: AWS
+                  Provider: Lambda
+                  Version: '1'
+                Configuration:
+                  FunctionName: !Ref CreateStageArtifactLambda
+                InputArtifacts:
+                  - Name: !Ref SecondaryProvider
+                OutputArtifacts:
+                  - Name: SecondStageArtifact-Source
+                  - Name: SecondStageArtifact-Parameter
+                RunOrder: 1
+                Region: !Ref AWS::Region
+
+
+              - Name: Deploy-2
+                ActionTypeId:
+                  Category: Deploy
+                  Owner: AWS
+                  Provider: CloudFormation
+                  Version: '1'
+                Configuration:
+                  ActionMode: CREATE_UPDATE
+                  RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+                  StackName: !Sub ${AWS::StackName}-Stack-Stage-${AWS::Region}-${SecondaryProvider}
+                  TemplatePath: !Sub SecondStageArtifact-Source::${SecondaryTemplatePath}
+                  TemplateConfiguration: SecondStageArtifact-Parameter::parameters.json
+                  Capabilities: CAPABILITY_IAM,CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
+                InputArtifacts:
+                  - Name: SecondStageArtifact-Source
+                  - Name: SecondStageArtifact-Parameter
+                RunOrder: 3
+                Region: !Ref AWS::Region
           - !Ref AWS::NoValue
-
-        - Name: CheckChanges
-          Actions:
-            - Name: CreateChangeSet
-              ActionTypeId:
-                Category: Deploy
-                Owner: AWS
-                Provider: CloudFormation
-                Version: '1'
-              Configuration:
-                ActionMode: CHANGE_SET_REPLACE
-                RoleArn: !GetAtt CloudFormationExecutionRole.Arn
-                StackName: !Sub ${AWS::StackName}-Stack-Stage-${AWS::Region}
-                ChangeSetName: !FindInMap ["StageArtifact", "Name", "ChangeSet"]
-                TemplatePath: !Sub Source::${TemplatePath}
-                Capabilities: CAPABILITY_IAM,CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
-                ParameterOverrides: !If [ HasStageParameters, !Ref StageParameters, !Ref "AWS::NoValue" ]
-              InputArtifacts:
-                - Name: Source
-              OutputArtifacts:
-                - Name: !FindInMap ["StageArtifact", "Name", "ChangeSet"]
-              RunOrder: 1
-              Region: !Ref AWS::Region
-
-            - Name: CheckChangeSetForChanges
-              ActionTypeId:
-                Category: Invoke
-                Owner: AWS
-                Provider: Lambda
-                Version: '1'
-              Configuration:
-                FunctionName: !Ref ChangeSetValidatorLambda
-              InputArtifacts:
-                - Name: !FindInMap ["StageArtifact", "Name", "ChangeSet"]
-              RunOrder: 2
-              Region: !Ref AWS::Region
 
         - Name: ValidateTemplates
           Actions:
-            - Name: CfnNag
+            - Name: !Sub CfnNag-${Provider}
               InputArtifacts:
-                - Name: Source
+                - Name: !Ref Provider
               ActionTypeId:
                 Category: Build
                 Owner: AWS
@@ -453,12 +539,12 @@ Resources:
               Configuration:
                 ProjectName: !Ref CfnNagBuildProject
               OutputArtifacts:
-                - Name: CfnNagOutput
+                - Name: CfnNagOutput-1
               RunOrder: 1
 
-            - Name: CfnLint
+            - Name: !Sub CfnLint-${Provider}
               InputArtifacts:
-                - Name: Source
+                - Name: !Ref Provider
               ActionTypeId:
                 Category: Build
                 Owner: AWS
@@ -467,10 +553,38 @@ Resources:
               Configuration:
                 ProjectName: !Ref CfnLintBuildProject
               OutputArtifacts:
-                - Name: CfnLintOutput
+                - Name: CfnLintOutput-1
               RunOrder: 2
 
-        - Name: !Sub Stage-${AWS::Region}
+            - Name: !Sub CfnNag-${SecondaryProvider}
+              InputArtifacts:
+                - Name: !Ref SecondaryProvider
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CfnNagBuildProject
+              OutputArtifacts:
+                - Name: CfnNagOutput-2
+              RunOrder: 3
+
+            - Name: !Sub CfnLint-${SecondaryProvider}
+              InputArtifacts:
+                - Name: !Ref SecondaryProvider
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CfnLintBuildProject
+              OutputArtifacts:
+                - Name: CfnLintOutput-2
+              RunOrder: 4
+
+        - Name: !Sub Stage-${AWS::Region}-${SecondaryProvider}
           Actions:
             - !If
               - DeletingStage
@@ -483,12 +597,12 @@ Resources:
                 Configuration:
                   ActionMode: CREATE_UPDATE
                   RoleArn: !GetAtt CloudFormationExecutionRole.Arn
-                  StackName: !Sub ${AWS::StackName}-Stack-Stage-${AWS::Region}
-                  TemplatePath: !Sub Source::${TemplatePath}
+                  StackName: !Sub ${AWS::StackName}-Stack-Stage-${AWS::Region}-${SecondaryProvider}
+                  TemplatePath: !Sub ${SecondaryProvider}::${SecondaryTemplatePath}
                   Capabilities: CAPABILITY_IAM,CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
                   ParameterOverrides: !If [ HasStageParameters, !Ref StageParameters, !Ref "AWS::NoValue" ]
                 InputArtifacts:
-                  - Name: Source
+                - Name: !Ref SecondaryProvider
                 RunOrder: 1
                 Region: !Ref AWS::Region
               - Name: ExecuteChangeSet
@@ -500,10 +614,10 @@ Resources:
                 Configuration:
                   ActionMode: CHANGE_SET_EXECUTE
                   RoleArn: !GetAtt CloudFormationExecutionRole.Arn
-                  StackName: !Sub ${AWS::StackName}-Stack-Stage-${AWS::Region}
-                  ChangeSetName: !FindInMap ["StageArtifact", "Name", "ChangeSet"]
+                  StackName: !Sub ${AWS::StackName}-Stack-Stage-${AWS::Region}-${SecondaryProvider}
+                  ChangeSetName: !FindInMap ["SecondStageArtifact", "Name", "ChangeSet"]
                 OutputArtifacts:
-                  - Name: !Sub ${AWS::StackName}-ExecutedChangeSet-Stage-${AWS::Region}
+                  - Name: !Sub ${AWS::StackName}-ExecutedChangeSet-Stage-${AWS::Region}-${SecondaryProvider}
                 RunOrder: 1
                 Region: !Ref AWS::Region
 
@@ -516,7 +630,7 @@ Resources:
               Configuration:
                 FunctionName: !Ref DriftDetectionLambda
               InputArtifacts:
-                - Name: Source
+                - Name: !Ref SecondaryProvider
               RunOrder: 2
               Region: !Ref AWS::Region
 
@@ -543,7 +657,7 @@ Resources:
                 Configuration:
                   ActionMode: DELETE_ONLY
                   RoleArn: !GetAtt CloudFormationExecutionRole.Arn
-                  StackName: !Sub ${AWS::StackName}-Stack-Stage-${AWS::Region}
+                  StackName: !Sub ${AWS::StackName}-Stack-Stage-${AWS::Region}-${SecondaryProvider}
                 RunOrder: 4
                 Region: !Ref AWS::Region
               - !Ref AWS::NoValue
@@ -557,13 +671,105 @@ Resources:
               Configuration:
                 FunctionName: !Ref StageArtifactSsmLambda
               InputArtifacts:
-                - Name: Source
+                - Name: !Ref SecondaryProvider
+              RunOrder: !If [ DeletingStage, 5, 4 ]
+              Region: !Ref AWS::Region
+
+        - Name: !Sub Stage-${AWS::Region}${Provider}
+          Actions:
+            - !If
+              - DeletingStage
+              - Name: CreateUpdate
+                ActionTypeId:
+                  Category: Deploy
+                  Owner: AWS
+                  Provider: CloudFormation
+                  Version: '1'
+                Configuration:
+                  ActionMode: CREATE_UPDATE
+                  RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+                  StackName: !Sub ${AWS::StackName}-Stack-Stage-${AWS::Region}-${Provider}
+                  TemplatePath: !Sub ${Provider}::${TemplatePath}
+                  Capabilities: CAPABILITY_IAM,CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
+                  ParameterOverrides: !If [ HasStageParameters, !Ref StageParameters, !Ref "AWS::NoValue" ]
+                InputArtifacts:
+                - Name: !Ref Provider
+                RunOrder: 1
+                Region: !Ref AWS::Region
+
+              - Name: ExecuteChangeSet
+                ActionTypeId:
+                  Category: Deploy
+                  Owner: AWS
+                  Provider: CloudFormation
+                  Version: '1'
+                Configuration:
+                  ActionMode: CHANGE_SET_EXECUTE
+                  RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+                  StackName: !Sub ${AWS::StackName}-Stack-Stage-${AWS::Region}-${Provider}
+                  ChangeSetName: !FindInMap ["StageArtifact", "Name", "ChangeSet"]
+                OutputArtifacts:
+                  - Name: !Sub ${AWS::StackName}-ExecutedChangeSet-Stage-${AWS::Region}-${Provider}
+                RunOrder: 1
+                Region: !Ref AWS::Region
+
+            - Name: DriftDetection
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: !Ref DriftDetectionLambda
+              InputArtifacts:
+                - Name: !Ref Provider
+              RunOrder: 2
+              Region: !Ref AWS::Region
+
+            - Name: ApproveChangeSet
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: '1'
+              Configuration:
+                NotificationArn: !Ref NotificationSnsTopic
+                CustomData: "Do you want to approve to deploy the changes to production stacks?"
+              RunOrder: 3
+              Region: !Ref AWS::Region
+
+            - !If
+              - DeletingStage
+              - Name: DeleteStageStack
+                ActionTypeId:
+                  Category: Deploy
+                  Owner: AWS
+                  Provider: CloudFormation
+                  Version: '1'
+                Configuration:
+                  ActionMode: DELETE_ONLY
+                  RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+                  StackName: !Sub ${AWS::StackName}-Stack-Stage-${AWS::Region}-${Provider}
+                RunOrder: 4
+                Region: !Ref AWS::Region
+              - !Ref AWS::NoValue
+
+            - Name: PutStageArtifact
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              Configuration:
+                FunctionName: !Ref StageArtifactSsmLambda
+              InputArtifacts:
+                - Name: !Ref Provider
               RunOrder: !If [ DeletingStage, 5, 4 ]
               Region: !Ref AWS::Region
 
         - Name: !Sub Secondary-${SecondaryRegion}
           Actions:
-            - Name: CreateUpdate
+            - Name: !Sub CreateUpdate-${Provider}
               ActionTypeId:
                 Category: Deploy
                 Owner: AWS
@@ -572,18 +778,36 @@ Resources:
               Configuration:
                 ActionMode: CREATE_UPDATE
                 RoleArn: !GetAtt CloudFormationExecutionRole.Arn
-                StackName: !Sub ${AWS::StackName}-Stack-Secondary-${SecondaryRegion}
-                TemplatePath: !Sub Source::${TemplatePath}
+                StackName: !Sub ${AWS::StackName}-Stack-Secondary-${SecondaryRegion}-${Provider}
+                TemplatePath: !Sub ${Provider}::${TemplatePath}
                 Capabilities: CAPABILITY_IAM,CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
                 ParameterOverrides: !If [ HasSecondaryParameters, !Ref SecondaryParameters, !Ref "AWS::NoValue" ]
               InputArtifacts:
-                - Name: Source
+                - Name: !Ref Provider
               RunOrder: 1
+              Region: !Ref SecondaryRegion
+
+            - Name: !Sub CreateUpdate-${SecondaryProvider}
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+                StackName: !Sub ${AWS::StackName}-Stack-Secondary-${SecondaryRegion}-${SecondaryProvider}
+                TemplatePath: !Sub ${SecondaryProvider}::${SecondaryTemplatePath}
+                Capabilities: CAPABILITY_IAM,CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
+                ParameterOverrides: !If [ HasSecondaryParameters, !Ref SecondaryParameters, !Ref "AWS::NoValue" ]
+              InputArtifacts:
+                - Name: !Ref SecondaryProvider
+              RunOrder: 2
               Region: !Ref SecondaryRegion
 
         - Name: !Sub PrimaryProd-${AWS::Region}
           Actions:
-            - Name: CreateUpdate
+            - Name: !Sub CreateUpdate-${Provider}
               ActionTypeId:
                 Category: Deploy
                 Owner: AWS
@@ -592,17 +816,36 @@ Resources:
               Configuration:
                 ActionMode: CREATE_UPDATE
                 RoleArn: !GetAtt CloudFormationExecutionRole.Arn
-                StackName: !Sub ${AWS::StackName}-Stack-PrimaryProd-${AWS::Region}
-                TemplatePath: !Sub Source::${TemplatePath}
+                StackName: !Sub ${AWS::StackName}-Stack-PrimaryProd-${AWS::Region}-${Provider}
+                TemplatePath: !Sub ${Provider}::${TemplatePath}
                 Capabilities: CAPABILITY_IAM,CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
                 ParameterOverrides: !If [ HasPrimaryParameters, !Ref PrimaryParameters, !Ref "AWS::NoValue" ]
               InputArtifacts:
-                - Name: Source
+                - Name: !Ref Provider
               RunOrder: 1
+              Region: !Ref AWS::Region
+
+            - Name: !Sub  CreateUpdate-${SecondaryProvider}
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+                StackName: !Sub ${AWS::StackName}-Stack-PrimaryProd-${AWS::Region}-${SecondaryProvider}
+                TemplatePath: !Sub ${SecondaryProvider}::${SecondaryTemplatePath}
+                Capabilities: CAPABILITY_IAM,CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
+                ParameterOverrides: !If [ HasPrimaryParameters, !Ref PrimaryParameters, !Ref "AWS::NoValue" ]
+              InputArtifacts:
+                - Name: !Ref SecondaryProvider
+              RunOrder: 2
               Region: !Ref AWS::Region
 
   InfraPipelineWebhook:
     Type: AWS::CodePipeline::Webhook
+    Condition: IsGitHub
     Properties:
       Authentication: GITHUB_HMAC
       AuthenticationConfiguration:
@@ -657,7 +900,7 @@ Resources:
           - Name: TEMPLATE_PATH
             Value: !Ref TemplatePath
           - Name: RUNNING_CFN_NAG
-            Value: "Yes"
+            Value: "No"
       ServiceRole: !Ref CodeBuildServiceRole
       EncryptionKey: !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/s3
 
@@ -706,7 +949,7 @@ Resources:
           - Name: TEMPLATE_PATH
             Value: !Ref TemplatePath
           - Name: RUNNING_CFN_LINT
-            Value: "Yes"
+            Value: "No"
       ServiceRole: !Ref CodeBuildServiceRole
       EncryptionKey: !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/s3
 
@@ -802,7 +1045,7 @@ Resources:
                 Resource:
                   - arn:aws:s3:::* # We don't know the name or prefix of the bucket to be created at this point
 
-  ChangeSetValidatorLambda:
+  ChangeSetValidatorLambdaFirstRepo:
     Type: AWS::Lambda::Function
     Properties:
       Description: Validates that a CloudFormation ChangeSet contains changes before pushing it through the rest of the CodePipeline
@@ -815,12 +1058,34 @@ Resources:
       Timeout: 180
       Environment:
         Variables:
-          STACK_NAME: !Sub ${AWS::StackName}-Stack-Stage-${AWS::Region}
+          STACK_NAME: !Sub ${AWS::StackName}-Stack-Stage-${AWS::Region}-${Provider}
           REGION: !Ref AWS::Region
           SOLUTION_ID: SO0086
           UUID: !GetAtt UuidGenerator.Value
           VERSION: SOLUTION_VERSION
           ARTIFACT_SOURCE: !Join ["", ["/", !Ref "AWS::StackName", "/", !FindInMap ["StageArtifact", "Parameter", "Source"]]]
+          DELETE_STAGE_STACK: !Ref DeleteStageStack
+          SEND_METRICS: !FindInMap ["Solution" ,"Metrics" ,"SendAnonymousData"]
+
+  ChangeSetValidatorLambdaSecondRepo:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Validates that a CloudFormation ChangeSet contains changes before pushing it through the rest of the CodePipeline
+      Handler: index.handler
+      Role: !GetAtt ChangeSetValidatorLambdaRole.Arn
+      Code:
+        S3Bucket: !Join ["-", [!FindInMap ["SourceCode", "General", "S3Bucket"], Ref: "AWS::Region"]]
+        S3Key: !Join ["/", [!FindInMap ["SourceCode", "General", "KeyPrefix"],  "changeset-validator.zip"]]
+      Runtime: nodejs12.x
+      Timeout: 180
+      Environment:
+        Variables:
+          STACK_NAME: !Sub ${AWS::StackName}-Stack-Stage-${AWS::Region}-${SecondaryProvider}
+          REGION: !Ref AWS::Region
+          SOLUTION_ID: SO0086
+          UUID: !GetAtt UuidGenerator.Value
+          VERSION: SOLUTION_VERSION
+          ARTIFACT_SOURCE: !Join ["", ["/", !Ref "AWS::StackName", "/", !FindInMap ["SecondStageArtifact", "Parameter", "Source"]]]
           DELETE_STAGE_STACK: !Ref DeleteStageStack
           SEND_METRICS: !FindInMap ["Solution" ,"Metrics" ,"SendAnonymousData"]
 
@@ -862,6 +1127,7 @@ Resources:
                 Action:
                   - codepipeline:PutJobFailureResult
                   - codepipeline:PutJobSuccessResult
+                  - lambda:*
                 Resource:
                   - "*"
               - Effect: Allow
@@ -869,6 +1135,8 @@ Resources:
                   - ssm:GetParameter
                 Resource:
                   - !Join ["/", [!Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}", !FindInMap ["StageArtifact", "Parameter", "Source"]]]
+                  - !Join ["/", [!Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}", !FindInMap ["SecondStageArtifact", "Parameter", "Source"]]]
+                  
 
   CreateStageArtifactLambda:
     Type: AWS::Lambda::Function
@@ -889,6 +1157,10 @@ Resources:
           ARTIFACT_PARAMETER: !Join ["", ["/", !Ref "AWS::StackName", "/", !FindInMap ["StageArtifact", "Parameter", "Parameter"]]]
           ARTIFACT_SOURCE_NAME: !FindInMap ["StageArtifact", "Name", "Source"]
           ARTIFACT_PARAMETER_NAME: !FindInMap ["StageArtifact", "Name", "Parameter"]
+          SECOND_ARTIFACT_SOURCE: !Join ["", ["/", !Ref "AWS::StackName", "/", !FindInMap ["SecondStageArtifact", "Parameter", "Source"]]]
+          SECOND_ARTIFACT_PARAMETER: !Join ["", ["/", !Ref "AWS::StackName", "/", !FindInMap ["SecondStageArtifact", "Parameter", "Parameter"]]]
+          SECOND_ARTIFACT_SOURCE_NAME: !FindInMap ["SecondStageArtifact", "Name", "Source"]
+          SECOND_ARTIFACT_PARAMETER_NAME: !FindInMap ["SecondStageArtifact", "Name", "Parameter"]
 
   CreateStageArtifactLambdaRole:
     Type: AWS::IAM::Role
@@ -936,6 +1208,8 @@ Resources:
                 Resource:
                   - !Join ["/", [!Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}", !FindInMap ["StageArtifact", "Parameter", "Source"]]]
                   - !Join ["/", [!Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}", !FindInMap ["StageArtifact", "Parameter", "Parameter"]]]
+                  - !Join ["/", [!Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}", !FindInMap ["SecondStageArtifact", "Parameter", "Source"]]]
+                  - !Join ["/", [!Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}", !FindInMap ["SecondStageArtifact", "Parameter", "Parameter"]]]
               - Effect: Allow
                 Action:
                   - cloudformation:DescribeStacks
@@ -963,6 +1237,8 @@ Resources:
         Variables:
           ARTIFACT_SOURCE: !Join ["", ["/", !Ref "AWS::StackName", "/", !FindInMap ["StageArtifact", "Parameter", "Source"]]]
           ARTIFACT_PARAMETER: !Join ["", ["/", !Ref "AWS::StackName", "/", !FindInMap ["StageArtifact", "Parameter", "Parameter"]]]
+          SECOND_ARTIFACT_SOURCE: !Join ["", ["/", !Ref "AWS::StackName", "/", !FindInMap ["SecondStageArtifact", "Parameter", "Source"]]]
+          SECOND_ARTIFACT_PARAMETER: !Join ["", ["/", !Ref "AWS::StackName", "/", !FindInMap ["SecondStageArtifact", "Parameter", "Parameter"]]]
           CLOUDFORMATION_PARAMETERS: !If [ HasStageParameters, !Ref StageParameters, !Ref "AWS::NoValue" ]
 
   StageArtifactSsmLambdaRole:
@@ -999,6 +1275,8 @@ Resources:
                 Resource:
                   - !Join ["/", [!Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}", !FindInMap ["StageArtifact", "Parameter", "Source"]]]
                   - !Join ["/", [!Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}", !FindInMap ["StageArtifact", "Parameter", "Parameter"]]]
+                  - !Join ["/", [!Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}", !FindInMap ["SecondStageArtifact", "Parameter", "Source"]]]
+                  - !Join ["/", [!Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}", !FindInMap ["SecondStageArtifact", "Parameter", "Parameter"]]]
               - Effect: Allow
                 Action:
                   - codepipeline:PutJobFailureResult
@@ -1099,6 +1377,8 @@ Resources:
           ACTION_NAME: ApproveChangeSet
           ARTIFACT_SOURCE: !Join ["", ["/", !Ref "AWS::StackName", "/", !FindInMap ["StageArtifact", "Parameter", "Source"]]]
           ARTIFACT_PARAMETER: !Join ["", ["/", !Ref "AWS::StackName", "/", !FindInMap ["StageArtifact", "Parameter", "Parameter"]]]
+          SECOND_ARTIFACT_SOURCE: !Join ["", ["/", !Ref "AWS::StackName", "/", !FindInMap ["SecondStageArtifact", "Parameter", "Source"]]]
+          SECOND_ARTIFACT_PARAMETER: !Join ["", ["/", !Ref "AWS::StackName", "/", !FindInMap ["SecondStageArtifact", "Parameter", "Parameter"]]]
           DELETE_STAGE_STACK: !Ref DeleteStageStack
           TEMPLATE_PATH: !Ref TemplatePath
 
@@ -1131,6 +1411,8 @@ Resources:
                 Resource:
                   - !Join ["/", [!Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}", !FindInMap ["StageArtifact", "Parameter", "Source"]]]
                   - !Join ["/", [!Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}", !FindInMap ["StageArtifact", "Parameter", "Parameter"]]]
+                  - !Join ["/", [!Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}", !FindInMap ["SecondStageArtifact", "Parameter", "Source"]]]
+                  - !Join ["/", [!Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${AWS::StackName}", !FindInMap ["SecondStageArtifact", "Parameter", "Parameter"]]]
               - Effect: Allow
                 Action:
                   - s3:GetObject
