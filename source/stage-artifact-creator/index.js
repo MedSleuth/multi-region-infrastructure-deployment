@@ -14,9 +14,27 @@ exports.handler = async (event, context) => {
   console.log(`Requested event: ${JSON.stringify(event, null, 2)}`);
 
   const codePipelineJob = event['CodePipeline.job'];
+  console.log('CodePipelineJOB:#######' , codePipelineJob);
   const outputArtifact = codePipelineJob.data.outputArtifacts;
-  const sourceOutputArtifact = outputArtifact.filter(artifact => artifact.name === ARTIFACT_SOURCE_NAME)[0];
-  const parameterOutputArtifact = outputArtifact.filter(artifact => artifact.name === ARTIFACT_PARAMETER_NAME)[0];
+  console.log('OUTPUTARTIFACT:######', outputArtifact);
+  const sourceOutputArtifact = outputArtifact.filter(artifact => {
+    
+    if(artifact.name == 'SecondStageArtifact-Source') {
+      return true;
+    } else {
+      return artifact.name === ARTIFACT_SOURCE_NAME;
+    }
+  })[0];
+  
+  console.log ('Source:######' , sourceOutputArtifact);
+  const parameterOutputArtifact = outputArtifact.filter(artifact => {
+    if(artifact.name == 'SecondStageArtifact-Parameter') {
+      return true;
+    } else {
+      return artifact.name === ARTIFACT_PARAMETER_NAME
+    }
+  })[0];
+  console.log ('Parameter:#####' , parameterOutputArtifact);
   const soureArtifactBucket = sourceOutputArtifact.location.s3Location.bucketName;
   const soureArtifactObjectKey = sourceOutputArtifact.location.s3Location.objectKey;
   const parameterArtifactBucket = parameterOutputArtifact.location.s3Location.bucketName;
